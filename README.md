@@ -27,10 +27,15 @@ lite-tasktracker/
 
 ### Prerequisites
 
-- Node.js v18+
-- Docker (for building and deploying)
-- AWS CLI configured with valid credentials (for deploy/teardown)
-- `jq` (for the deploy and teardown scripts)
+| Requirement | Purpose | Install |
+|---|---|---|
+| Node.js v18+ | Run frontend/backend locally and tests | [nodejs.org](https://nodejs.org) |
+| Docker + Docker Desktop | Build and push container images | [docker.com](https://www.docker.com) |
+| AWS CLI v2 | Query CloudFormation, push to ECR, update ECS | [AWS docs](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) |
+| `jq` | Parse CloudFormation output in deploy/teardown scripts | `brew install jq` |
+| AWS credentials | Authenticate all AWS CLI calls | `aws configure` or set `AWS_PROFILE` |
+
+`deploy.sh` and `teardown.sh` check all of the above at startup and will print a clear error message for anything missing or misconfigured before doing any work.
 
 ### Run the app locally
 

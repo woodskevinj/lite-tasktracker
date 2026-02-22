@@ -3,6 +3,36 @@ set -euo pipefail
 
 STACK_NAME="LiteInfraStack"
 
+# ---------------------------------------------------------------------------
+# Prerequisite checks
+# ---------------------------------------------------------------------------
+echo "=== Checking prerequisites ==="
+
+MISSING=0
+for cmd in aws jq; do
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "  [MISSING] $cmd is not installed or not on PATH"
+    MISSING=1
+  else
+    echo "  [OK]      $cmd"
+  fi
+done
+
+if ! aws sts get-caller-identity &>/dev/null; then
+  echo "  [MISSING] AWS credentials are not configured or have expired"
+  echo "            Run 'aws configure' or set AWS_PROFILE / AWS_ACCESS_KEY_ID"
+  MISSING=1
+else
+  echo "  [OK]      AWS credentials"
+fi
+
+if [ "$MISSING" -eq 1 ]; then
+  echo ""
+  echo "One or more prerequisites are missing. Fix the issues above and re-run."
+  exit 1
+fi
+
+echo ""
 echo "=== Querying CloudFormation stack: ${STACK_NAME} ==="
 
 STACK_OUTPUTS=$(aws cloudformation describe-stacks \
