@@ -1,71 +1,73 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-STACK_NAME="TasktrackerStack"
-REGION=$(aws configure get region)
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+STACK_NAME="LiteInfraStack"
 
-FRONTEND_REPO="tasktracker-frontend"
-BACKEND_REPO="tasktracker-backend"
-FRONTEND_IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${FRONTEND_REPO}:latest"
-BACKEND_IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${BACKEND_REPO}:latest"
+echo "=== Querying CloudFormation stack: ${STACK_NAME} ==="
 
-echo "=== Discovering ECS resources from CloudFormation stack: ${STACK_NAME} ==="
-
-CLUSTER_ARN=$(aws cloudformation describe-stack-resources \
+# Fetch all stack outputs in one call and extract needed values
+STACK_OUTPUTS=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
-  --query "StackResources[?ResourceType=='AWS::ECS::Cluster'].PhysicalResourceId | [0]" \
-  --output text)
+  --query "Stacks[0].Outputs" \
+  --output json)
 
-SERVICE_NAME=$(aws cloudformation describe-stack-resources \
-  --stack-name "$STACK_NAME" \
-  --query "StackResources[?ResourceType=='AWS::ECS::Service'].PhysicalResourceId | [0]" \
-  --output text)
+get_output() {
+  echo "$STACK_OUTPUTS" | jq -r --arg key "$1" '.[] | select(.OutputKey == $key) | .OutputValue'
+}
 
-# The service physical ID is "cluster-name/service-name" — extract just the service name
-SERVICE_NAME="${SERVICE_NAME##*/}"
+CLUSTER_NAME=$(get_output "EcsClusterName")
+SERVICE_NAME=$(get_output "EcsServiceName")
+FRONTEND_ECR_URI=$(get_output "FrontendEcrUri")
+BACKEND_ECR_URI=$(get_output "BackendEcrUri")
+ALB_DNS=$(get_output "AlbDnsName")
 
-TASK_DEF_FAMILY=$(aws cloudformation describe-stack-resources \
-  --stack-name "$STACK_NAME" \
-  --query "StackResources[?ResourceType=='AWS::ECS::TaskDefinition'].PhysicalResourceId | [0]" \
-  --output text)
+echo "  Cluster:      ${CLUSTER_NAME}"
+echo "  Service:      ${SERVICE_NAME}"
+echo "  Frontend ECR: ${FRONTEND_ECR_URI}"
+echo "  Backend ECR:  ${BACKEND_ECR_URI}"
+echo "  ALB DNS:      ${ALB_DNS}"
 
-# The physical ID is the full task def ARN — extract the family name (without revision)
-TASK_DEF_FAMILY=$(echo "$TASK_DEF_FAMILY" | awk -F'/' '{print $2}' | awk -F':' '{print $1}')
-
-echo "  Cluster: ${CLUSTER_ARN}"
-echo "  Service: ${SERVICE_NAME}"
-echo "  Task Definition Family: ${TASK_DEF_FAMILY}"
+# Derive the ECR registry host from the frontend URI (strip /repo-name)
+ECR_REGISTRY="${FRONTEND_ECR_URI%%/*}"
 
 echo ""
 echo "=== Logging in to ECR ==="
-aws ecr get-login-password --region "$REGION" \
-  | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+aws ecr get-login-password \
+  | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
 echo ""
 echo "=== Building and pushing frontend ==="
-docker build -t "${FRONTEND_REPO}:latest" ./frontend
-docker tag "${FRONTEND_REPO}:latest" "$FRONTEND_IMAGE"
-docker push "$FRONTEND_IMAGE"
+docker build -t "${FRONTEND_ECR_URI}:latest" ./frontend
+docker push "${FRONTEND_ECR_URI}:latest"
 
 echo ""
 echo "=== Building and pushing backend ==="
-docker build -t "${BACKEND_REPO}:latest" ./backend
-docker tag "${BACKEND_REPO}:latest" "$BACKEND_IMAGE"
-docker push "$BACKEND_IMAGE"
+docker build -t "${BACKEND_ECR_URI}:latest" ./backend
+docker push "${BACKEND_ECR_URI}:latest"
 
 echo ""
 echo "=== Registering new task definition revision ==="
 
-# Fetch the current task definition
+# Get the current task definition ARN from the running service
+CURRENT_TASK_DEF_ARN=$(aws ecs describe-services \
+  --cluster "$CLUSTER_NAME" \
+  --services "$SERVICE_NAME" \
+  --query "services[0].taskDefinition" \
+  --output text)
+
+echo "  Current task definition: ${CURRENT_TASK_DEF_ARN}"
+
+# Fetch the current task definition and transform it:
+#   - Replace frontend container image with ECR URI
+#   - Replace backend container image with ECR URI and remove any placeholder command
+#   - Strip fields that cannot be included when re-registering
 TASK_DEF_JSON=$(aws ecs describe-task-definition \
-  --task-definition "$TASK_DEF_FAMILY" \
+  --task-definition "$CURRENT_TASK_DEF_ARN" \
   --query "taskDefinition")
 
-# Replace placeholder images with ECR URIs and strip fields that can't be re-registered
 NEW_TASK_DEF=$(echo "$TASK_DEF_JSON" | jq \
-  --arg frontend_image "$FRONTEND_IMAGE" \
-  --arg backend_image "$BACKEND_IMAGE" \
+  --arg frontend_image "${FRONTEND_ECR_URI}:latest" \
+  --arg backend_image "${BACKEND_ECR_URI}:latest" \
   '
   .containerDefinitions |= map(
     if .name == "frontend" then .image = $frontend_image
@@ -73,7 +75,8 @@ NEW_TASK_DEF=$(echo "$TASK_DEF_JSON" | jq \
     else .
     end
   )
-  | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)
+  | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+        .compatibilities, .registeredAt, .registeredBy)
   ')
 
 NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
@@ -86,20 +89,15 @@ echo "  New task definition: ${NEW_TASK_DEF_ARN}"
 echo ""
 echo "=== Updating ECS service ==="
 aws ecs update-service \
-  --cluster "$CLUSTER_ARN" \
+  --cluster "$CLUSTER_NAME" \
   --service "$SERVICE_NAME" \
   --task-definition "$NEW_TASK_DEF_ARN" \
   --force-new-deployment \
   --query "service.deployments[0].{Status:status,Running:runningCount,Desired:desiredCount}" \
   --output table
 
-ALB_DNS=$(aws cloudformation describe-stacks \
-  --stack-name "$STACK_NAME" \
-  --query "Stacks[0].Outputs[?OutputKey=='AlbDnsName'].OutputValue" \
-  --output text)
-
 echo ""
 echo "=== Deployment triggered successfully ==="
 echo "Task definition: ${NEW_TASK_DEF_ARN}"
 echo "Application URL: http://${ALB_DNS}"
-echo "Monitor with: aws ecs describe-services --cluster ${CLUSTER_ARN} --services ${SERVICE_NAME} --query 'services[0].deployments'"
+echo "Monitor with:    aws ecs describe-services --cluster ${CLUSTER_NAME} --services ${SERVICE_NAME} --query 'services[0].deployments'"
