@@ -103,12 +103,10 @@ TASK_DEF_JSON=$(aws ecs describe-task-definition \
   --query "taskDefinition")
 
 NEW_TASK_DEF=$(echo "$TASK_DEF_JSON" | jq \
-  --arg frontend_image "${FRONTEND_ECR_URI}:latest" \
-  --arg backend_image "${BACKEND_ECR_URI}:latest" \
+  --arg app_image "${FRONTEND_ECR_URI}:latest" \
   '
   .containerDefinitions |= map(
-    if .name == "frontend" then .image = $frontend_image
-    elif .name == "backend" then .image = $backend_image | del(.command)
+    if .name == "app" then .image = $app_image | del(.command)
     else .
     end
   )
