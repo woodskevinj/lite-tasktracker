@@ -95,8 +95,7 @@ CURRENT_TASK_DEF_ARN=$(aws ecs describe-services \
 echo "  Current task definition: ${CURRENT_TASK_DEF_ARN}"
 
 # Fetch the current task definition and transform it:
-#   - Replace frontend container image with ECR URI
-#   - Replace backend container image with ECR URI and remove any placeholder command
+#   - Replace the app container image with the ECR frontend URI
 #   - Strip fields that cannot be included when re-registering
 TASK_DEF_JSON=$(aws ecs describe-task-definition \
   --task-definition "$CURRENT_TASK_DEF_ARN" \
